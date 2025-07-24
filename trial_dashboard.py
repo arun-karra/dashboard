@@ -179,30 +179,32 @@ r2c4.metric("Forms Late (>5d)",         late_forms);    r2c4.caption("Forms subm
 
 st.markdown("---")
 
-# --- Site Delay Frequency Chart ---
-site_delays = (
-    sites_df
-    .groupby(s_site)
-    .agg(
-        assets_late=("max_upload_delay", lambda s: (s>5).sum()),
-        tasks_late=("task_delay",        lambda s: (s>5).sum())
-    )
-    .reset_index()
-)
+# --- 🛑 Site Delay Frequency (Grouped Horizontal Bars) ---
 st.subheader("🔴 Site Delay Frequency (≥5 days)")
-st.caption("Count of assessments with asset or task delays ≥5 days.")
-sd_long = site_delays.melt(id_vars=[s_site], var_name="Delay Type", value_name="Count")
-chart = (
-    alt.Chart(sd_long)
-    .mark_bar()
-    .encode(
-        x=alt.X(f"{s_site}:N", title="Site"),
-        y="Count:Q",
-        color="Delay Type:N",
-        column=alt.Column("Delay Type:N", title=None)
-    )
-    .properties(width=150)
+st.caption("Number of assessments delayed ≥5 days, by site and delay type.")
+
+# Melt your existing site_delays DataFrame
+# site_delays has columns: [s_site, 'assets_late', 'tasks_late']
+delays_melted = site_delays.melt(
+    id_vars=[s_site],
+    value_vars=["assets_late", "tasks_late"],
+    var_name="Delay Type",
+    value_name="Delayed Count"
 )
+
+# Draw horizontal grouped bars
+chart = (
+    alt.Chart(delays_melted)
+       .mark_bar()
+       .encode(
+           y=alt.Y(f"{s_site}:N", sort='-x', title="Site"),
+           x=alt.X("Delayed Count:Q", title="Count of Delayed Assessments"),
+           color=alt.Color("Delay Type:N", title="Type of Delay"),
+           tooltip=[s_site, "Delay Type", "Delayed Count"]
+       )
+       .properties(height=400)
+)
+
 st.altair_chart(chart, use_container_width=True)
 
 # --- 🚩 Action‑Type Breakdown ---
