@@ -223,18 +223,18 @@ if rev_comment and "review_comment" in sites_df.columns:
 st.subheader("⚠️ Assessments In Progress with No Assets")
 st.caption("Assessments still ‘In Progress’ that have not yet had any assets uploaded.")
 
-# build a mask for status == In Progress and max_upload_delay == 0 or NaN
+# only those truly missing any upload
 no_asset_mask = (
     (sites_df[s_status].str.lower() == "in progress") &
-    ((sites_df["max_upload_delay"].isna()) | (sites_df["max_upload_delay"] == 0))
+    sites_df[first_upload_col].isna()
 )
 
-# select the columns to show
-no_asset_df = sites_df.loc[no_asset_mask, [s_site, s_subj, s_visit, s_assess, s_date]]
+no_asset_df = sites_df.loc[
+    no_asset_mask, 
+    [s_site, s_subj, s_visit, s_assess, s_date]
+]
 
-# reset_index to hide the pandas index
 st.dataframe(no_asset_df.reset_index(drop=True), height=250)
-
 
 # --- ⏱️ Visit‑Window Adherence ---
 st.subheader("⏱️ Visits Outside Allowed Window")
