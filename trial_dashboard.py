@@ -5,7 +5,7 @@ import altair as alt
 import re
 from datetime import datetime, timedelta
 
-# --- Page Config ---
+# --- Page Setup ---
 st.set_page_config(layout="wide", page_title="Clinical Trial Dashboard")
 st.title("📊 Clinical Trial Snapshot")
 
@@ -19,20 +19,19 @@ if not (asset_buf and forms_buf and sites_buf):
     st.stop()
 
 # --- Helpers ---
-def normalize(col_name: str) -> str:
-    s = str(col_name).lower()
+def normalize(name: str) -> str:
+    s = str(name).lower()
     s = re.sub(r'[^a-z0-9]', ' ', s)
     return re.sub(r'\s+', ' ', s).strip()
 
 def col(df: pd.DataFrame, *cands) -> str | None:
-    """Fuzzy-match a column name by normalizing."""
     norm_map = {normalize(c): c for c in df.columns}
     # exact
     for cand in cands:
         nc = normalize(cand)
         if nc in norm_map:
             return norm_map[nc]
-    # partial
+    # fuzzy
     for cand in cands:
         nc = normalize(cand)
         for nm, orig in norm_map.items():
@@ -57,13 +56,13 @@ asset_df = load_df(asset_buf)
 forms_df = load_df(forms_buf)
 sites_df = load_df(sites_buf)
 
-# --- Debug: detected columns ---
+# --- Debug: show detected columns ---
 with st.expander("🔧 Detected Columns"):
-    st.write("Assets:", asset_df.columns.tolist())
-    st.write("Forms:", forms_df.columns.tolist())
-    st.write("Sites:", sites_df.columns.tolist())
+    st.write("Assets:", list(asset_df.columns))
+    st.write("Forms:", list(forms_df.columns))
+    st.write("Sites:", list(sites_df.columns))
 
-# --- Identify columns ---
+# --- Identify Columns ---
 # Sites report
 s_site       = col(sites_df, "Site Name")
 s_subj       = col(sites_df, "Subject Number")
@@ -90,22 +89,22 @@ f_spid       = col(forms_df, "Study Procedure ID", "Assessment ID")
 f_created    = col(forms_df, "Date Created", "Form Created Date")
 f_submitted  = col(forms_df, "Submitted Date", "Form Submitted Date")
 
-# --- Validate presence ---
+# --- Validate Required Columns ---
 required = {
     "Sites":  [s_site, s_subj, s_visit, s_assess, s_date],
     "Assets": [a_site, a_subj, a_visit, a_assess, a_date, a_upload],
     "Forms":  [f_spid, f_submitted],
 }
-errs = []
+errors = []
 for name, cols in required.items():
-    miss = [c for c in cols if c is None]
-    if miss:
-        errs.append(f"{name}: missing columns {miss}")
-if errs:
-    st.error("❌ Required columns missing:\n" + "\n".join(errs))
+    missing = [c for c in cols if c is None]
+    if missing:
+        errors.append(f"{name} missing {missing}")
+if errors:
+    st.error("❌ Missing required columns:\n" + "\n".join(errors))
     st.stop()
 
-# --- Parse datetimes ---
+# --- Parse Date Columns ---
 for df, cols in [
     (sites_df, [s_date, s_status_dt, act_raised, act_resolved] + task_cols),
     (asset_df, [a_date, a_upload]),
@@ -115,13 +114,14 @@ for df, cols in [
         if c in df.columns:
             df[c] = pd.to_datetime(df[c], errors="coerce")
 
-# --- Compute asset delays & merge into sites ---
+# --- Compute Asset Delays & Merge into Sites ---
 asset_df["upload_delay"] = (asset_df[a_upload] - asset_df[a_date]).dt.days
+first_upload_col = "first_upload_date"
 asset_agg = (
     asset_df
     .groupby([a_site, a_subj, a_visit, a_assess], as_index=False)
     .agg(
-        first_upload=("upload_date", "min"),
+        **{first_upload_col: (a_upload, "min")},
         max_upload_delay=("upload_delay", "max")
     )
 )
@@ -133,33 +133,31 @@ sites_df = sites_df.merge(
 )
 sites_df["max_upload_delay"] = sites_df["max_upload_delay"].fillna(0).astype(int)
 
-# --- Merge forms into sites on Assessment ID ---
+# --- Merge Forms by Assessment ID ---
 sites_df = sites_df.merge(
     forms_df[[f_spid, f_submitted]].rename(columns={f_spid: s_id, f_submitted: "form_submitted"}),
     how="left",
     on=s_id
 )
 
-# --- KPI Calculations ---
+# --- KPI Computations ---
 today = pd.Timestamp(datetime.now().date())
 
 # 1) Total Assessments & Subjects
-total_assess  = sites_df[s_id].nunique()
-total_subjects = sites_df[s_subj].nunique()
+total_assess = sites_df[s_id].nunique()
+total_subj   = sites_df[s_subj].nunique()
 
 # 2) Assessments In Progress
-in_progress = (
-    sites_df[sites_df[s_status].str.lower() == "in progress"][s_id].nunique()
-)
+in_prog = sites_df[sites_df[s_status].str.lower()=="in progress"][s_id].nunique()
 
 # 3) Avg Cycle Time (days)
 completed = sites_df[sites_df[s_status_dt].notna()]
 avg_cycle = ((completed[s_status_dt] - completed[s_date]).dt.days).mean()
 
-# 4) Assessments w/o assets >5d
+# 4) Assessments w/o assets > 5 days
 late_assets = sites_df[sites_df["max_upload_delay"] > 5][s_id].nunique()
 
-# 5) Tasks outstanding >5d
+# 5) Tasks outstanding > 5 days
 sites_df["task_delay"] = sites_df[task_cols].apply(
     lambda row: (row - sites_df.loc[row.name, s_date]).dt.days.max(),
     axis=1
@@ -171,8 +169,8 @@ site_delays = (
     sites_df
     .groupby(s_site)
     .agg(
-        assets_late=("max_upload_delay", lambda s: (s>5).sum()),
-        tasks_late =("task_delay",      lambda s: (s>5).sum())
+        assets_late = ("max_upload_delay", lambda s: (s>5).sum()),
+        tasks_late  = ("task_delay",        lambda s: (s>5).sum())
     )
     .reset_index()
 )
@@ -182,64 +180,61 @@ open_actions = sites_df[
     sites_df[act_raised].notna() & sites_df[act_resolved].isna()
 ][s_id].nunique()
 
-# 8) Forms not submitted >5d post upload
-sites_df["form_delay"] = (sites_df["form_submitted"] - sites_df["first_upload"]).dt.days
+# 8) Forms not submitted > 5 days post-upload
+sites_df["form_delay"] = (sites_df["form_submitted"] - sites_df[first_upload_col]).dt.days
 late_forms = sites_df[sites_df["form_delay"] > 5][s_id].nunique()
 
-# --- Display Metrics ---
+# --- Display Metrics with Descriptions ---
 st.header("Key Metrics")
 
 # Row 1
-c1, c2, c3, c4 = st.columns(4)
-c1.metric("Total Assessments",   total_assess)
-c1.caption("Count of all planned assessments up to today.")
-c2.metric("Total Subjects",      total_subjects)
-c2.caption("Unique enrolled subjects.")
-c3.metric("In Progress",         in_progress)
-c3.caption("Assessments not yet marked Complete.")
-c4.metric("Avg Cycle Time (days)", f"{avg_cycle:.1f}")
-c4.caption("Avg days from Assessment Date → Status Date (Complete).")
+r1c1, r1c2, r1c3, r1c4 = st.columns(4)
+r1c1.metric("Total Assessments",    total_assess)
+r1c1.caption("All planned assessments to date.")
+r1c2.metric("Total Subjects",       total_subj)
+r1c2.caption("Unique subjects enrolled.")
+r1c3.metric("In Progress",          in_prog)
+r1c3.caption("Assessments not marked complete.")
+r1c4.metric("Avg Cycle Time (days)", f"{avg_cycle:.1f}")
+r1c4.caption("Mean days from assessment date to status date for completed.")
 
 # Row 2
-c5, c6, c7, c8 = st.columns(4)
-c5.metric("Assess w/o Assets >5d", late_assets)
-c5.caption("Assessments where assets uploaded >5 days after visit.")
-c6.metric("Tasks >5d Outstanding", late_tasks)
-c6.caption("Any Task (1–n) >5 days past Assessment Date or missing.")
-c7.metric("Open Action Required",  open_actions)
-c7.caption("QC flags raised but not yet resolved.")
-c8.metric("Forms >5d post‑upload", late_forms)
-c8.caption("Form submissions delayed >5 days after first asset upload.")
+r2c1, r2c2, r2c3, r2c4 = st.columns(4)
+r2c1.metric("Assets Late (>5d)",    late_assets)
+r2c1.caption("Assessments with assets uploaded >5 days after date.")
+r2c2.metric("Tasks Outstanding (>5d)", late_tasks)
+r2c2.caption("Assessments with any task outstanding >5 days post date.")
+r2c3.metric("Open Action Required",  open_actions)
+r2c3.caption("QC flags raised but not resolved.")
+r2c4.metric("Forms Late (>5d)",      late_forms)
+r2c4.caption("Forms submitted >5 days after first asset upload.")
 
 st.markdown("---")
 
 # --- Delayed Assessments Section ---
-st.subheader("⏰ Assessments Delayed >5 days")
+st.subheader("⏰ Assessments Delayed ≥5 days (In Progress)")
 delay_mask = (
-    (sites_df[s_status].str.lower() == "in progress") &
+    (sites_df[s_status].str.lower()=="in progress") &
     ((today - sites_df[s_date]).dt.days >= 5)
 )
-delayed_assess = sites_df[delay_mask]
 st.dataframe(
-    delayed_assess[[s_site, s_subj, s_visit, s_assess, s_date]],
+    sites_df[delay_mask][[s_site, s_subj, s_visit, s_assess, s_date]],
     height=250
 )
 
 # --- Assets Not Yet Uploaded Section ---
-st.subheader("📁 Assets Not Uploaded >5 days")
-# Criteria: first_upload is null or max_upload_delay >= 5
-missing_mask = (sites_df["max_upload_delay"] >= 5)
+st.subheader("📁 Assets Not Uploaded ≥5 days")
+asset_mask = sites_df["max_upload_delay"] >= 5
 st.dataframe(
-    sites_df[missing_mask][[s_site, s_subj, s_visit, s_assess, s_date, "max_upload_delay"]],
+    sites_df[asset_mask][[s_site, s_subj, s_visit, s_assess, first_upload_col, "max_upload_delay"]],
     height=250
 )
 
 # --- Site Delay Frequency Chart ---
-st.subheader("🔴 Site Delay Frequency (Late >5 days)")
-st.caption("Bars show number of assessments with asset or task delays ≥5 days, grouped by site.")
+st.subheader("🔴 Site Delay Frequency (≥5 days)")
+st.caption("Bars show count of assessments with asset or task delays ≥5 days.")
 sd_long = site_delays.melt(
     id_vars=[s_site],
-    value_vars=["assets_late","tasks_late"],
     var_name="Delay Type",
     value_name="Count"
 )
@@ -260,16 +255,16 @@ st.altair_chart(chart, use_container_width=True)
 st.subheader("🕒 Most Recent Activity")
 tabA, tabB, tabC = st.tabs(["Assets","Forms","Assessments"])
 with tabA:
-    st.write("Recent Asset Uploads")
+    st.write("### Recent Asset Uploads")
     dfA = asset_df.sort_values(a_upload, ascending=False).head(5)
     st.table(dfA[[a_site, a_subj, a_visit, a_assess, a_date, a_upload, "upload_delay"]])
 with tabB:
-    st.write("Recent Form Submissions")
+    st.write("### Recent Form Submissions")
     dfB = forms_df.sort_values(f_submitted, ascending=False).head(5)
     st.table(dfB[[f_spid, f_created, f_submitted]])
 with tabC:
-    st.write("Recent Assessment Completions")
-    dfC = sites_df.dropna(subset=[s_status_dt]).sort_values(s_status_dt, ascending=False).head(5)
+    st.write("### Recent Assessment Completions")
+    dfC = sites_df[sites_df[s_status_dt].notna()].sort_values(s_status_dt, ascending=False).head(5)
     st.table(dfC[[s_id, s_date, s_status_dt]])
 
-st.success("✅ Dashboard generated! Adjust criteria in code as needed.")
+st.success("✅ Dashboard loaded successfully!")
