@@ -183,8 +183,18 @@ st.markdown("---")
 st.subheader("🔴 Site Delay Frequency (≥5 days)")
 st.caption("Number of assessments delayed ≥5 days, by site and delay type.")
 
-# Melt your existing site_delays DataFrame
-# site_delays has columns: [s_site, 'assets_late', 'tasks_late']
+# Recompute site_delays
+site_delays = (
+    sites_df
+    .groupby(s_site)
+    .agg(
+        assets_late=("max_upload_delay", lambda s: (s > 5).sum()),
+        tasks_late =("task_delay",        lambda s: (s > 5).sum())
+    )
+    .reset_index()
+)
+
+# Melt to long form
 delays_melted = site_delays.melt(
     id_vars=[s_site],
     value_vars=["assets_late", "tasks_late"],
@@ -192,7 +202,7 @@ delays_melted = site_delays.melt(
     value_name="Delayed Count"
 )
 
-# Draw horizontal grouped bars
+# Horizontal grouped bar chart
 chart = (
     alt.Chart(delays_melted)
        .mark_bar()
