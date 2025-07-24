@@ -19,12 +19,12 @@ if not (asset_buf and forms_buf and sites_buf):
     st.stop()
 
 # --- Helpers for Fuzzy Column Matching ---
-def normalize(name):
+def normalize(name: str) -> str:
     s = str(name).lower()
     s = re.sub(r'[^a-z0-9]', ' ', s)
     return re.sub(r'\s+', ' ', s).strip()
 
-def col(df, *cands):
+def col(df: pd.DataFrame, *cands) -> str | None:
     norm_map = {normalize(c): c for c in df.columns}
     for cand in cands:
         nc = normalize(cand)
@@ -38,7 +38,7 @@ def col(df, *cands):
     return None
 
 @st.cache_data(show_spinner=False)
-def load_df(buf):
+def load_df(buf) -> pd.DataFrame:
     raw = pd.read_excel(buf, header=None)
     hdr = 0
     for i in range(len(raw)):
@@ -54,7 +54,7 @@ asset_df = load_df(asset_buf)
 forms_df = load_df(forms_buf)
 sites_df = load_df(sites_buf)
 
-# --- Show Detected Columns ---
+# --- Debug: Show Detected Columns ---
 with st.expander("🔧 Detected Columns"):
     st.write("Assets:", asset_df.columns.tolist())
     st.write("Forms:",  forms_df.columns.tolist())
@@ -92,15 +92,15 @@ rev_comment  = col(forms_df, "Review Comment", "ReviewComment")
 required = {
     "Sites":  [s_site, s_subj, s_visit, s_assess, s_date],
     "Assets": [a_site, a_subj, a_visit, a_assess, a_date, a_upload],
-    "Forms":  [f_spid, f_submitted]
+    "Forms":  [f_spid, f_submitted],
 }
-errs = []
+errors = []
 for name, cols in required.items():
     missing = [c for c in cols if c is None]
     if missing:
-        errs.append(f"{name}: missing {missing}")
-if errs:
-    st.error("❌ Cannot continue, missing columns:\n" + "\n".join(errs))
+        errors.append(f"{name} missing {missing}")
+if errors:
+    st.error("❌ Missing required columns:\n" + "\n".join(errors))
     st.stop()
 
 # --- Parse Date Columns ---
@@ -110,19 +110,19 @@ for df, cols in [
     (forms_df, [f_created, f_submitted])
 ]:
     for c in cols:
-        if c in df.columns:
+        if c and c in df.columns:
             df[c] = pd.to_datetime(df[c], errors="coerce")
 
 # --- Compute Asset Delays & Merge into Sites ---
 asset_df["upload_delay"] = (asset_df[a_upload] - asset_df[a_date]).dt.days
-first_up_col = "first_upload"
+first_up = "first_upload"
 asset_agg = (
     asset_df
     .groupby([a_site, a_subj, a_visit, a_assess], as_index=False)
-    .agg(**{
-        first_up_col:       (a_upload, "min"),
-        "max_upload_delay": ("upload_delay", "max")
-    })
+    .agg(
+        **{first_up: (a_upload, "min")},
+        max_upload_delay=("upload_delay", "max")
+    )
 )
 sites_df = sites_df.merge(
     asset_agg,
@@ -132,26 +132,18 @@ sites_df = sites_df.merge(
 )
 sites_df["max_upload_delay"] = sites_df["max_upload_delay"].fillna(0).astype(int)
 
-# --- Merge Forms by Assessment ID (safely include ReviewComment if present) ---
-# Build list of columns to merge
+# --- Merge Forms by Assessment ID (conditional review_comment) ---
 forms_merge_cols = [f_spid, f_submitted]
-rename_map       = {f_spid: s_id, f_submitted: "form_submitted"}
-
+rename_map = {f_spid: s_id, f_submitted: "form_submitted"}
 if rev_comment and rev_comment in forms_df.columns:
     forms_merge_cols.append(rev_comment)
     rename_map[rev_comment] = "review_comment"
-
 forms_subset = forms_df[forms_merge_cols].rename(columns=rename_map)
-
-sites_df = sites_df.merge(
-    forms_subset,
-    how="left",
-    on=s_id
-)
-
-today = pd.Timestamp(datetime.now().date())
+sites_df = sites_df.merge(forms_subset, how="left", on=s_id)
 
 # --- KPI Computations ---
+today = pd.Timestamp(datetime.now().date())
+
 # 1) Total Assessments & Subjects
 total_assess = sites_df[s_id].nunique()
 total_subj   = sites_df[s_subj].nunique()
@@ -172,160 +164,142 @@ sites_df["task_delay"] = sites_df[task_cols].apply(
 )
 late_tasks = sites_df[sites_df["task_delay"] > 5][s_id].nunique()
 
-# 6) Open Actions
-open_actions = sites_df[sites_df[act_raised].notna() & sites_df[act_resolved].isna()][s_id].nunique()
+# 6) Open Action Required
+open_actions = sites_df[
+    sites_df[act_raised].notna() & sites_df[act_resolved].isna()
+][s_id].nunique()
 
 # 7) Forms Late >5 days post-upload
-sites_df["form_delay"] = (sites_df["form_submitted"] - sites_df[first_up_col]).dt.days
+sites_df["form_delay"] = (sites_df["form_submitted"] - sites_df[first_up]).dt.days
 late_forms = sites_df[sites_df["form_delay"] > 5][s_id].nunique()
 
 # --- Additional Metrics ---
-
-# A) Composite Risk Score per Site
-site_counts = sites_df.groupby(s_site)[s_id].nunique().rename("total_assessments")
-site_flags = sites_df.groupby(s_site).agg(
+# Composite Risk Score per site
+flags = sites_df.groupby(s_site).agg(
     upload_late_rate=("max_upload_delay", lambda x: (x>5).sum()/len(x)),
-    task_late_rate  =("task_delay",      lambda x: (x>5).sum()/len(x)),
-    form_late_rate  =("form_delay",      lambda x: (x>5).sum()/len(x)),
-    action_rate     =(act_raised,        lambda x: x.notna() & sites_df.loc[x.index, act_resolved].isna())
-                       .sum()/len(x)
-)
-site_flags["risk_score"] = site_flags[["upload_late_rate","task_late_rate","form_late_rate","action_rate"]].mean(axis=1)*100
-risk_df = site_flags.reset_index()
+    task_late_rate  =("task_delay",       lambda x: (x>5).sum()/len(x)),
+    form_late_rate  =("form_delay",       lambda x: (x>5).sum()/len(x)),
+    action_rate     =(act_raised,         lambda x: (x.notna() & sites_df.loc[x.index, act_resolved].isna()).sum()/len(x))
+).reset_index()
+flags["risk_score"] = flags[["upload_late_rate","task_late_rate","form_late_rate","action_rate"]].mean(axis=1)*100
 
-# B) Visit‑Window Adherence
-# Define expected offsets and tolerances
+# Visit-Window Adherence
 offsets = {
-    "Baseline": 0,
-    "Week 4": 28,
-    "Week 12": 84,
-    "Month 6": 182,
-    "Month 12": 364,
-    "Month 18": 546,
-    "Month 24": 728,
-    "Month 30": 910
+    "Baseline":0, "Week 4":28, "Week 12":84,
+    "Month 6":182, "Month 12":364
 }
-tolerance = {k: (3 if "Week" in k else 14) for k in offsets}
-# Merge baseline date per subject
-baseline = sites_df[sites_df[s_assess]=="Baseline"][[s_site,s_subj,s_date]].rename(columns={s_date:"baseline_date"})
+tolerances = {k:(3 if "Week" in k else 14) for k in offsets}
+baseline = sites_df[sites_df[s_assess]=="Baseline"][[s_site,s_subj,s_date]].rename(columns={s_date:"baseline"})
 vw = sites_df.merge(baseline, on=[s_site,s_subj], how="left")
-vw["days_since_base"] = (vw[s_date] - vw["baseline_date"]).dt.days
-vw["within_window"] = vw.apply(lambda r: abs(r["days_since_base"] - offsets.get(r[s_assess],0)) <= tolerance.get(r[s_assess],0), axis=1)
-adherence = vw.groupby(s_assess).agg(
-    total=("within_window", "size"),
-    on_time=("within_window", "sum")
+vw["days_since_base"] = (vw[s_date] - vw["baseline"]).dt.days
+vw["within_window"] = vw.apply(
+    lambda r: abs(r["days_since_base"]-offsets.get(r[s_assess],0)) <= tolerances.get(r[s_assess],0),
+    axis=1
+)
+adh = vw.groupby(s_assess).agg(
+    total=("within_window","size"),
+    on_time=("within_window","sum")
 ).assign(pct=lambda df: df["on_time"]/df["total"]*100).reset_index()
 
-# C) Site Engagement Trend (rolling 4-week)
-comp = sites_df[comp_mask].copy()
-comp["week"] = comp[s_status_dt].dt.to_period("W").apply(lambda p: p.start_time)
-trend = comp.groupby([s_site,"week"]).size().reset_index(name="completions")
-# D) Missing Data Summary
+# Site Engagement Trend
+trend = sites_df[comp_mask].copy()
+trend["week"] = trend[s_status_dt].dt.to_period("W").apply(lambda p:p.start_time)
+tr = trend.groupby([s_site,"week"]).size().reset_index(name="completions")
+
+# Missing Data Summary
 mv = sites_df.groupby([s_site,s_subj,s_visit]).size().reset_index(name="count")
-missing_data = mv[mv["count"]<6]
-# E) Action‑Type Breakdown
-if "review_comment" in sites_df.columns:
-    top_actions = (sites_df["review_comment"]
-                   .value_counts().head(3)
-                   .rename_axis("reason").reset_index(name="count"))
+missing = mv[mv["count"]<6]
 
-# F) Data‑Quality Index
-dq = site_flags.copy()
-# compute missing_visit_rate per site
-miss_visit_rate = missing_data.groupby(s_site).size().rename("miss_visit_count") / site_counts
-dq = dq.join(miss_visit_rate, on=s_site).fillna(0)
-dq["miss_visit_rate"] = dq["miss_visit_count"]/site_counts
+# Action-Type Breakdown
+if rev_comment and "review_comment" in sites_df.columns:
+    top_reasons = sites_df["review_comment"].value_counts().head(3).reset_index()
+    top_reasons.columns = ["reason","count"]
+
+# Data-Quality Index
+dq = flags.set_index(s_site)
+miss_visit = missing.groupby(s_site).size()/sites_df.groupby(s_site)[s_id].nunique()
+dq["miss_visit_rate"] = miss_visit.reindex(dq.index).fillna(0)
 dq["dqi"] = (1 - dq[["upload_late_rate","task_late_rate","form_late_rate","action_rate","miss_visit_rate"]].mean(axis=1))*100
-dq_df = dq.reset_index().rename(columns={"index":s_site})
+dq_df = dq.reset_index()
 
-# --- Display KPIs ---
+# --- Display Metrics ---
 st.header("Key Metrics")
-# Row1
-r1c1, r1c2, r1c3, r1c4 = st.columns(4)
-r1c1.metric("Total Assessments", total_assess);       r1c1.caption("All planned assessments to date.")
-r1c2.metric("Total Subjects", total_subj);            r1c2.caption("Unique subjects enrolled.")
-r1c3.metric("In Progress", in_prog);                  r1c3.caption("Assessments not yet Complete.")
-r1c4.metric("Avg Cycle Time (days)", f"{avg_cycle:.1f}"); r1c4.caption("Mean days from assessment → status.")
 
-# Row2
-r2c1, r2c2, r2c3, r2c4 = st.columns(4)
-r2c1.metric("Assets Late (>5d)", late_assets);      r2c1.caption("Assets uploaded >5 days post‑assessment.")
-r2c2.metric("Tasks Outstanding (>5d)", late_tasks); r2c2.caption("Any task >5 days past assessment.")
-r2c3.metric("Open Actions", open_actions);          r2c3.caption("QC flags raised but unresolved.")
-r2c4.metric("Forms Late (>5d)", late_forms);        r2c4.caption("Forms submitted >5 days after upload.")
+# Row 1
+c1,c2,c3,c4 = st.columns(4)
+c1.metric("Total Assessments", total_assess);       c1.caption("All planned assessments to date.")
+c2.metric("Total Subjects",    total_subj);         c2.caption("Unique subjects enrolled.")
+c3.metric("In Progress",       in_prog);            c3.caption("Assessments not yet Complete.")
+c4.metric("Avg Cycle Time (d)",f"{avg_cycle:.1f}"); c4.caption("Mean days from assessment to status.")
+
+# Row 2
+c5,c6,c7,c8 = st.columns(4)
+c5.metric("Assets Late (>5d)",    late_assets); c5.caption("Assets uploaded >5d post-assessment.")
+c6.metric("Tasks Outstanding (>5d)", late_tasks); c6.caption("Any task >5d past assessment.")
+c7.metric("Open Action Required",   open_actions); c7.caption("QC flags unresolved.")
+c8.metric("Forms Late (>5d)",       late_forms); c8.caption("Forms submitted >5d after upload.")
 
 st.markdown("---")
 
-# --- Composite Risk Score Chart ---
+# Composite Risk Score Chart
 st.subheader("🚨 Composite Risk Score per Site")
-st.caption("Average of four delay rates (assets, tasks, forms, actions) ×100.")
-risk_chart = (
-    alt.Chart(risk_df)
-    .mark_bar()
-    .encode(
-        x=alt.X(f"{s_site}:N", title="Site"),
-        y=alt.Y("risk_score:Q", title="Risk Score (%)"),
-        color=alt.Color("risk_score:Q", scale=alt.Scale(scheme="redblue"), title="Risk")
-    )
+st.caption("Avg of delay rates (assets, tasks, forms, actions) ×100.")
+risk_chart = alt.Chart(flags).mark_bar().encode(
+    x=alt.X(f"{s_site}:N", title="Site"),
+    y=alt.Y("risk_score:Q", title="Risk Score (%)"),
+    color=alt.Color("risk_score:Q", scale=alt.Scale(scheme="redblue"), title="Risk")
 )
 st.altair_chart(risk_chart, use_container_width=True)
 
-# --- Visit‑Window Adherence ---
-st.subheader("✅ Visit‑Window Adherence")
-st.caption("Percentage of assessments occurring within allowed window.")
-adh_chart = (
-    alt.Chart(adherence)
-    .mark_bar()
-    .encode(
-        x=alt.X(f"{s_assess}:N", title="Visit Type"),
-        y=alt.Y("pct:Q", title="% Within Window"),
-        tooltip=["on_time","total","pct"]
-    )
+# Visit-Window Adherence Chart
+st.subheader("✅ Visit-Window Adherence")
+st.caption("Percentage of visits within protocol window.")
+adh_chart = alt.Chart(adh).mark_bar().encode(
+    x=alt.X(f"{s_assess}:N", title="Visit Type"),
+    y=alt.Y("pct:Q", title="% Within Window"),
+    tooltip=["on_time","total","pct"]
 )
 st.altair_chart(adh_chart, use_container_width=True)
 
-# --- Site Engagement Trend ---
-st.subheader("📈 Site Engagement Trend (4‑week rolling completions)")
-trend_chart = (
-    alt.Chart(trend)
-    .mark_line(point=True)
-    .encode(
-        x="week:T",
-        y="completions:Q",
-        color=alt.Color(f"{s_site}:N", title="Site")
-    )
+# Site Engagement Trend Chart
+st.subheader("📈 Site Engagement Trend (4-week)")
+trend_chart = alt.Chart(tr).mark_line(point=True).encode(
+    x="week:T",
+    y="completions:Q",
+    color=alt.Color(f"{s_site}:N", title="Site")
 )
 st.altair_chart(trend_chart, use_container_width=True)
 
-# --- Missing Data Summary ---
+# Missing Data Summary Table
 st.subheader("⚠️ Missing Data Summary")
 st.caption("Visits with fewer than 6 assessments recorded.")
-st.dataframe(missing_data[[s_site,s_subj,s_visit,"count"]], height=250)
+st.dataframe(missing[[s_site,s_subj,s_visit,"count"]], height=250)
 
-# --- Action‑Type Breakdown ---
-if "reason" in locals():
-    st.subheader("🔍 Top 3 Action‑Required Reasons")
-    st.bar_chart(top_actions.rename(columns={"reason":"index"}).set_index("index")["count"])
+# Action-Type Breakdown
+if rev_comment and "reason" in locals():
+    st.subheader("🔍 Top 3 QC Issues")
+    st.bar_chart(top_reasons.set_index("reason")["count"])
 
-# --- Data‑Quality Index ---
-st.subheader("🏅 Data‑Quality Index per Site")
-st.caption("100×(1 − avg(asset_late, task_late, form_late, action, missing_visit rates)).")
+# Data-Quality Index Table
+st.subheader("🏅 Data-Quality Index per Site")
+st.caption("100×(1 − avg delay/error rates & missing visit rate).")
 st.dataframe(dq_df[[s_site,"dqi"]].sort_values("dqi", ascending=False), height=250)
 
-# --- Recent Activity Panels (retained) ---
+# Recent Activity Tabs
 st.subheader("🕒 Most Recent Activity")
-tA, tB, tC = st.tabs(["Assets","Forms","Assessments"])
-with tA:
+tabA,tabB,tabC = st.tabs(["Assets","Forms","Assessments"])
+with tabA:
     st.write("### Recent Asset Uploads")
     dfA = asset_df.sort_values(a_upload, ascending=False).head(5)
     st.table(dfA[[a_site,a_subj,a_visit,a_assess,a_date,a_upload,"upload_delay"]])
-with tB:
+with tabB:
     st.write("### Recent Form Submissions")
     dfB = forms_df.sort_values(f_submitted, ascending=False).head(5)
     st.table(dfB[[f_spid,f_created,f_submitted]])
-with tC:
+with tabC:
     st.write("### Recent Assessment Completions")
     dfC = sites_df[comp_mask].sort_values(s_status_dt, ascending=False).head(5)
     st.table(dfC[[s_id,s_date,s_status_dt]])
 
-st.success("✅ Enhanced dashboard loaded successfully!")
+st.success("✅ Enhanced dashboard loaded successfully!")\n```
+
