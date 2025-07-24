@@ -132,9 +132,19 @@ sites_df = sites_df.merge(
 )
 sites_df["max_upload_delay"] = sites_df["max_upload_delay"].fillna(0).astype(int)
 
-# --- Merge Forms by Assessment ID ---
+# --- Merge Forms by Assessment ID (safely include ReviewComment if present) ---
+# Build list of columns to merge
+forms_merge_cols = [f_spid, f_submitted]
+rename_map       = {f_spid: s_id, f_submitted: "form_submitted"}
+
+if rev_comment and rev_comment in forms_df.columns:
+    forms_merge_cols.append(rev_comment)
+    rename_map[rev_comment] = "review_comment"
+
+forms_subset = forms_df[forms_merge_cols].rename(columns=rename_map)
+
 sites_df = sites_df.merge(
-    forms_df[[f_spid, f_submitted, rev_comment]].rename(columns={f_spid: s_id, f_submitted: "form_submitted", rev_comment: "review_comment"}),
+    forms_subset,
     how="left",
     on=s_id
 )
