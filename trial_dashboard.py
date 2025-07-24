@@ -229,7 +229,7 @@ st.dataframe(missing[[s_site,s_subj,s_visit,"Count"]].reset_index(drop=True), he
 
 # --- ⏱️ Visit‑Window Adherence ---
 st.subheader("⏱️ Visits Outside Allowed Window")
-st.caption("Week 4 ± 10 days; Month 6 ± 14 days.")
+st.caption(How many scheduled visits happened too early or too late relative to the protocol‑specified window around the target day."Week 4 ± 10 days; Month 6 ± 14 days.")
 baseline = sites_df[sites_df[s_assess]=="Baseline"][[s_site,s_subj,s_date]].rename(columns={s_date:"baseline"})
 vw = sites_df.merge(baseline, on=[s_site,s_subj], how="left")
 vw["days_from_base"] = (vw[s_date] - vw["baseline"]).dt.days
