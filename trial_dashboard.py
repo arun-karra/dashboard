@@ -301,5 +301,5 @@ with tabC:
     dfC = sites_df[comp_mask].sort_values(s_status_dt, ascending=False).head(5)
     st.table(dfC[[s_id,s_date,s_status_dt]])
 
-st.success("✅ Enhanced dashboard loaded successfully!")\n```
+st.success("✅ Enhanced dashboard loaded successfully!")\
 
